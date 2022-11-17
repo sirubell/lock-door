@@ -9,9 +9,131 @@ import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:image/image.dart' as img;
+import 'package:provider/provider.dart';
 
-void main() {
-  runApp(const MyApp());
+class DoorModel {
+  Uint8List secret;
+  Uint8List share1;
+
+  DoorModel({required this.secret, required this.share1});
+}
+
+class DoorsModel extends ChangeNotifier {
+  final Map<String, DoorModel> _map = {};
+  String currentDoorName = "";
+  int seed;
+  DateTime lastRefreshTime;
+
+  DoorsModel()
+      : seed = DateTime.now().millisecondsSinceEpoch,
+        lastRefreshTime = DateTime.now();
+
+  void setDoor(String doorName, DoorModel door) {
+    _map[doorName] = door;
+    notifyListeners();
+  }
+
+  DoorModel query(String doorName) {
+    return _map[doorName]!;
+  }
+
+  void setCurrentDoorName(String doorName) {
+    currentDoorName = doorName;
+    notifyListeners();
+  }
+
+  void setSeed(int seed) {
+    this.seed = seed;
+    lastRefreshTime = DateTime.now();
+    notifyListeners();
+  }
+}
+
+Future<Uint8List> loadDataFromAsset(String location) async {
+  final data = await rootBundle.load(location);
+  final buffer = img
+      .decodeImage(data.buffer.asUint8List())!
+      .getBytes(format: img.Format.luminance)
+      .map((e) => e == 0 ? 0 : 1)
+      .toList();
+  return Uint8List.fromList(buffer);
+}
+
+Future<DoorModel> loadDoor(
+  String secretLocation,
+  String share1Location,
+) async {
+  final secret = await loadDataFromAsset(secretLocation);
+  final share1 = await loadDataFromAsset(share1Location);
+
+  return DoorModel(
+    secret: secret,
+    share1: share1,
+  );
+}
+
+class Setting extends StatelessWidget {
+  const Setting({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final doors = ['door1', 'door2'];
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Setting'),
+      ),
+      body: Center(
+        child: Column(
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Text('Door: '),
+                DropdownButton(
+                  value: context.watch<DoorsModel>().currentDoorName,
+                  items: doors
+                      .map((String doorName) => DropdownMenuItem(
+                          value: doorName, child: Text(doorName)))
+                      .toList(),
+                  onChanged: (String? newValue) {
+                    if (newValue != null) {
+                      debugPrint(newValue);
+                      context.read<DoorsModel>().setCurrentDoorName(newValue);
+                    }
+                  },
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  final door1 = await loadDoor(
+    'assets/images/door1/door1_secret.png',
+    'assets/images/door1/door1_share1.png',
+  );
+  final door2 = await loadDoor(
+    'assets/images/door2/door2_secret.png',
+    'assets/images/door2/door2_share1.png',
+  );
+  final doors = DoorsModel();
+  doors.setDoor('door1', door1);
+  doors.setDoor('door2', door2);
+
+  doors.setCurrentDoorName('door1');
+
+  runApp(
+    ChangeNotifierProvider.value(
+      value: doors,
+      child: const MyApp(),
+    ),
+  );
 }
 
 class MyApp extends StatelessWidget {
@@ -39,49 +161,49 @@ class MyHomePage extends StatefulWidget {
 
 class _MyHomePageState extends State<MyHomePage> {
   final cameraController = MobileScannerController(
-    // facing: CameraFacing.back,
+    facing: CameraFacing.front,
     formats: [BarcodeFormat.qrCode],
   );
-  Uint8List secret = Uint8List(0);
-  Uint8List share1 = Uint8List(0);
   Color topBarColor = Colors.red;
-  Widget qrcode = const SizedBox.shrink();
-  int _seed = 0;
+  DateTime currentTime = DateTime.now();
 
   @override
   void initState() {
     super.initState();
 
-    rootBundle.load('assets/images/secret.png').then((data) {
-      final buffer = img
-          .decodeImage(data.buffer.asUint8List())!
-          .getBytes(format: img.Format.luminance)
-          .map((e) => e == 0 ? 1 : 0)
-          .toList();
-
+    Timer.periodic(const Duration(seconds: 1), (Timer t) {
       setState(() {
-        secret = Uint8List.fromList(buffer);
-      });
-    });
-    rootBundle.load('assets/images/share1.png').then((data) {
-      final buffer = img
-          .decodeImage(data.buffer.asUint8List())!
-          .getBytes(format: img.Format.luminance)
-          .map((e) => e == 0 ? 1 : 0)
-          .toList();
-
-      setState(() {
-        share1 = Uint8List.fromList(buffer);
+        currentTime = DateTime.now();
       });
     });
   }
 
   @override
   Widget build(BuildContext context) {
+    int seed = context.watch<DoorsModel>().seed;
+    String currentDoorName = context.watch<DoorsModel>().currentDoorName;
+    final lastRefreshTime = context.watch<DoorsModel>().lastRefreshTime;
+    final remainingTime =
+        lastRefreshTime.add(const Duration(minutes: 1)).difference(currentTime);
+    if (remainingTime.isNegative) {
+      context.read<DoorsModel>().setSeed(DateTime.now().millisecondsSinceEpoch);
+    }
+
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.title),
         backgroundColor: topBarColor,
+        actions: [
+          IconButton(
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const Setting()),
+              );
+            },
+            icon: const Icon(Icons.settings),
+          )
+        ],
       ),
       body: Column(
         mainAxisAlignment: MainAxisAlignment.center,
@@ -96,7 +218,11 @@ class _MyHomePageState extends State<MyHomePage> {
                   debugPrint('Failed to scan Barcode');
                 } else {
                   final String code = barcode.rawValue!;
-                  handleQrCode(code);
+                  handleQrCode(
+                    code,
+                    seed,
+                    context.read<DoorsModel>().query(currentDoorName),
+                  );
                 }
               },
             ),
@@ -106,19 +232,35 @@ class _MyHomePageState extends State<MyHomePage> {
               children: [
                 Flexible(
                   fit: FlexFit.tight,
-                  child: Center(child: qrcode),
+                  child: Center(
+                    child: generateQrCode(
+                      currentDoorName,
+                      seed,
+                    ),
+                  ),
                 ),
                 Flexible(
                   fit: FlexFit.loose,
-                  child: Center(
-                    child: ElevatedButton(
-                      onPressed: () {
-                        setState(() {
-                          qrcode = generateQrCode();
-                        });
-                      },
-                      child: const Text('Refresh'),
-                    ),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Text('Refresh in '),
+                          Text(remainingTime.inSeconds.toString()),
+                          const Text(' sec'),
+                        ],
+                      ),
+                      ElevatedButton(
+                        onPressed: () {
+                          context
+                              .read<DoorsModel>()
+                              .setSeed(DateTime.now().millisecondsSinceEpoch);
+                        },
+                        child: const Text('Refresh'),
+                      ),
+                    ],
                   ),
                 ),
               ],
@@ -129,28 +271,22 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  Widget generateQrCode() {
-    DateTime time = DateTime.now();
-    int seed = time.millisecondsSinceEpoch;
-    setState(() {
-      _seed = seed;
-    });
-
+  Widget generateQrCode(String doorName, int seed) {
     debugPrint('seed is $seed');
     return QrImage(
-      data: 'door=door1&seed=$seed',
+      data: 'd=$doorName&s=$seed',
       version: QrVersions.auto,
     );
   }
 
-  void handleQrCode(String data) {
+  void handleQrCode(String data, int seed, DoorModel door) {
     debugPrint(data);
-    var buffer = base64Decode(data);
-    if (buffer.length * 8 != share1.length) {
+    final buffer = base64Decode(data);
+    if (buffer.length * 8 != door.share1.length) {
       return;
     }
 
-    Random rng = Random(_seed);
+    Random rng = Random(seed);
 
     final buffer2 = buffer
         .map((e) => e ^ rng.nextInt(256))
@@ -166,12 +302,12 @@ class _MyHomePageState extends State<MyHomePage> {
         .expand((e) => e)
         .toList();
 
-    Uint8List overlapped = Uint8List(share1.length);
-    for (int i = 0; i < share1.length; i++) {
-      overlapped[i] = buffer2[i] | share1[i];
+    Uint8List overlapped = Uint8List(door.share1.length);
+    for (int i = 0; i < door.share1.length; i++) {
+      overlapped[i] = buffer2[i] & door.share1[i];
     }
 
-    if (validSecret(overlapped)) {
+    if (validateSecret(overlapped, door)) {
       debugPrint('Unlock!!!!!!!!!!!!!!!!!!!');
       setState(() {
         topBarColor = Colors.green;
@@ -186,7 +322,7 @@ class _MyHomePageState extends State<MyHomePage> {
     }
   }
 
-  bool validSecret(Uint8List overlapped) {
+  bool validateSecret(Uint8List overlapped, DoorModel door) {
     for (int i = 0; i < 20; i++) {
       for (int j = 0; j < 20; j++) {
         int count = 0;
@@ -195,12 +331,13 @@ class _MyHomePageState extends State<MyHomePage> {
         count += overlapped[(i * 2 + 1) * 40 + j * 2];
         count += overlapped[(i * 2 + 1) * 40 + j * 2 + 1];
 
-        assert(count == 3 || count == 4);
+        // debugPrint('$i, $j, $count ${door.secret[i * 20 + j]}');
+        assert(count == 0 || count == 1);
 
-        if (secret[i * 20 + j] == 0) {
-          if (count != 4) return false;
+        if (door.secret[i * 20 + j] == 0) {
+          if (count != 0) return false;
         } else {
-          if (count != 3) return false;
+          if (count != 1) return false;
         }
       }
     }
